@@ -1,4 +1,4 @@
-mesa==1.2.1
+mesa[viz]>=3.5.1,<4
 matplotlib>=3.7
 pandas>=2.0
 numpy>=1.24

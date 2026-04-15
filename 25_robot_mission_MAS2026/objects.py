@@ -1,62 +1,79 @@
-# Group: XX | Date: 2026-03-16 | Members: <your names here>
+# Groupe : 25
+# Date de creation : 2026-03-29
+# Membres : [Prenoms Noms]
 
-import random
-from mesa import Agent
+import mesa
 
 
-class RadioactivityAgent(Agent):
-    """
-    Passive agent placed on every cell to encode zone membership
-    and radioactivity level. Robots read this to know their zone.
+class WasteType:
+    GREEN = "green"
+    YELLOW = "yellow"
+    RED = "red"
 
-    Radioactivity ranges:
-        z1 (low)    -> [0.00, 0.33)
-        z2 (medium) -> [0.33, 0.66)
-        z3 (high)   -> [0.66, 1.00]
-    """
 
-    def __init__(self, model, zone: int):
+class ZoneType:
+    Z1 = "z1"
+    Z2 = "z2"
+    Z3 = "z3"
+
+
+WASTE_DISPOSAL_RADIOACTIVITY = 1.1
+
+ZONE_RANGES = {
+    ZoneType.Z1: (0.00, 0.33),
+    ZoneType.Z2: (0.33, 0.66),
+    ZoneType.Z3: (0.66, 1.00),
+}
+
+
+class RadioactivityAgent(mesa.Agent):
+    """Passive marker used by robots to infer zone and danger level."""
+
+    def __init__(self, model, zone):
         super().__init__(model)
-        self.zone = zone  # 1, 2 or 3
-        if zone == 1:
-            self.radioactivity = random.uniform(0.0, 0.33)
-        elif zone == 2:
-            self.radioactivity = random.uniform(0.33, 0.66)
-        else:
-            self.radioactivity = random.uniform(0.66, 1.0)
+        self.zone = zone
+        low, high = ZONE_RANGES[zone]
+        self.radioactivity = model.random.uniform(low, high)
 
     def step(self):
-        pass  # No behaviour
+        pass
+
+    def __repr__(self):
+        return f"RadioactivityAgent(zone={self.zone}, radioactivity={self.radioactivity:.3f})"
 
 
-class WasteDisposalZone(Agent):
-    """
-    Passive marker agent that identifies the easternmost column(s)
-    as the waste disposal zone. Robots drop red waste here.
-    """
+class WasteDisposalAgent(mesa.Agent):
+    """Passive agent that marks the final disposal cell."""
 
     def __init__(self, model):
         super().__init__(model)
 
     def step(self):
-        pass  # No behaviour
-
-
-class WasteAgent(Agent):
-    """
-    Passive object representing a piece of waste.
-    waste_type: "green" | "yellow" | "red"
-    """
-
-    COLORS = {"green": "green", "yellow": "yellow", "red": "red"}
-
-    def __init__(self, model, waste_type: str):
-        super().__init__(model)
-        assert waste_type in ("green", "yellow", "red")
-        self.waste_type = waste_type
-
-    def step(self):
-        pass  # No behaviour
+        pass
 
     def __repr__(self):
-        return f"Waste({self.waste_type})"
+        return "WasteDisposalAgent()"
+
+
+class WasteAgent(mesa.Agent):
+    """Waste object carried, transformed, dropped, or finally destroyed."""
+
+    def __init__(self, model, waste_type):
+        super().__init__(model)
+        self.waste_type = waste_type
+        self.picked_up = False
+
+    def step(self):
+        pass
+
+    def is_green(self):
+        return self.waste_type == WasteType.GREEN
+
+    def is_yellow(self):
+        return self.waste_type == WasteType.YELLOW
+
+    def is_red(self):
+        return self.waste_type == WasteType.RED
+
+    def __repr__(self):
+        return f"WasteAgent(type={self.waste_type}, picked_up={self.picked_up})"

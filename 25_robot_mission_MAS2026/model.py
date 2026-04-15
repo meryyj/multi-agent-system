@@ -1,229 +1,365 @@
-# Group: XX | Date: 2026-03-16 | Members: <your names here>
+# Groupe : 25
+# Date de creation : 2026-03-29
+# Membres : [Prenoms Noms]
 
-import random
-from mesa import Model
-from mesa.space import MultiGrid
-from mesa.datacollection import DataCollector
+import mesa
 
-from objects import RadioactivityAgent, WasteAgent, WasteDisposalZone
-from agents import GreenRobotAgent, YellowRobotAgent, RedRobotAgent, MOVE, PICK, TRANS, DROP, WAIT
-
-
-def count_waste(model, waste_type: str) -> int:
-    return sum(
-        1 for a in model.agents
-        if isinstance(a, WasteAgent) and a.waste_type == waste_type
-    )
+from objects import (
+    RadioactivityAgent,
+    WasteAgent,
+    WasteDisposalAgent,
+    WasteType,
+    ZoneType,
+    WASTE_DISPOSAL_RADIOACTIVITY,
+)
 
 
-class RobotMission(Model):
-    """
-    Main model for the robot waste-collection mission.
+class Action:
+    MOVE = "move"
+    PICK_UP = "pick_up"
+    TRANSFORM = "transform"
+    PUT_DOWN = "put_down"
+    WAIT = "wait"
 
-    Parameters
-    ----------
-    width, height   : grid dimensions
-    n_green_robots  : number of GreenRobotAgent
-    n_yellow_robots : number of YellowRobotAgent
-    n_red_robots    : number of RedRobotAgent
-    n_green_waste   : initial green waste in z1
-    seed            : random seed
-    """
+
+class RobotMission(mesa.Model):
+    """Main MAS model for the hostile-environment robot mission."""
+
+    SCENARIOS = ("No communication", "With communication")
 
     def __init__(
         self,
-        width=15,
-        height=10,
-        n_green_robots=2,
-        n_yellow_robots=2,
-        n_red_robots=2,
-        n_green_waste=10,
+        *,
+        grid_width=30,
+        grid_height=10,
+        n_green_robots=3,
+        n_yellow_robots=3,
+        n_red_robots=3,
+        n_green_wastes=12,
+        scenario="With communication",
         seed=None,
     ):
+        if grid_width % 3 != 0:
+            raise ValueError("grid_width must be a multiple of 3 to keep 3 balanced zones.")
+        if n_green_wastes % 4 != 0:
+            raise ValueError(
+                "n_green_wastes must be a multiple of 4 so the mission stays solvable."
+            )
+        if scenario not in self.SCENARIOS:
+            raise ValueError(f"scenario must be one of {self.SCENARIOS}.")
+
         super().__init__(seed=seed)
 
-        self.width  = width
-        self.height = height
-        self.grid   = MultiGrid(width, height, torus=False)
+        self.grid_width = grid_width
+        self.grid_height = grid_height
+        self.n_green_wastes = n_green_wastes
+        self.scenario = scenario
+        self.communication_enabled = scenario == "With communication"
+        self.total_cells = grid_width * grid_height
+        self.running = True
 
-        # Zone boundaries (columns, exclusive upper bound)
-        # z1: [0, z1_bound)  z2: [z1_bound, z2_bound)  z3: [z2_bound, width)
-        self.z1_bound = width // 3
-        self.z2_bound = 2 * (width // 3)
+        self.radiation_layer = mesa.space.PropertyLayer(
+            "radiation_level",
+            grid_width,
+            grid_height,
+            0.0,
+            dtype=float,
+        )
+        self.grid = mesa.space.MultiGrid(
+            grid_width,
+            grid_height,
+            torus=False,
+            property_layers=[self.radiation_layer],
+        )
 
-        self.running = True   # Mesa flag
+        self.z1_end = grid_width // 3
+        self.z2_end = 2 * grid_width // 3
 
-        # ---- Place radioactivity agents on every cell ----
-        for x in range(width):
-            for y in range(height):
-                if x < self.z1_bound:
-                    zone = 1
-                elif x < self.z2_bound:
-                    zone = 2
-                else:
-                    zone = 3
-                r = RadioactivityAgent(self, zone)
-                self.grid.place_agent(r, (x, y))
+        self.wastes_disposed = 0
+        self.mailbox = {}
+        self.message_counters = {
+            "waste_reports": 0,
+            "handoff_reports": 0,
+            "map_shares": 0,
+            "disposal_reports": 0,
+        }
 
-        # ---- Place waste disposal zone in the easternmost column ----
-        disposal_y = self.random.randint(0, height - 1)
-        self.disposal_pos = (width - 1, disposal_y)
-        dz = WasteDisposalZone(self)
-        self.grid.place_agent(dz, self.disposal_pos)
+        self._place_radioactivity()
+        self._place_waste_disposal()
+        self._place_wastes(n_green_wastes)
+        self._place_robots(n_green_robots, n_yellow_robots, n_red_robots)
 
-        # ---- Place green waste randomly in z1 ----
-        for _ in range(n_green_waste):
-            x = self.random.randint(0, self.z1_bound - 1)
-            y = self.random.randint(0, height - 1)
-            w = WasteAgent(self, "green")
-            self.grid.place_agent(w, (x, y))
-
-        # ---- Place robot agents ----
-        def place_robot(agent, x_range):
-            x = self.random.randint(*x_range)
-            y = self.random.randint(0, height - 1)
-            self.grid.place_agent(agent, (x, y))
-
-        for _ in range(n_green_robots):
-            place_robot(GreenRobotAgent(self), (0, self.z1_bound - 1))
-
-        for _ in range(n_yellow_robots):
-            place_robot(YellowRobotAgent(self), (0, self.z2_bound - 1))
-
-        for _ in range(n_red_robots):
-            place_robot(RedRobotAgent(self), (0, width - 1))
-
-        # ---- Data collector ----
-        self.datacollector = DataCollector(
+        self.datacollector = mesa.DataCollector(
             model_reporters={
-                "Green waste":  lambda m: count_waste(m, "green"),
-                "Yellow waste": lambda m: count_waste(m, "yellow"),
-                "Red waste":    lambda m: count_waste(m, "red"),
-                "Total waste":  lambda m: count_waste(m, "green")
-                                        + count_waste(m, "yellow")
-                                        + count_waste(m, "red"),
+                "Green wastes": lambda m: m.count_waste(WasteType.GREEN),
+                "Yellow wastes": lambda m: m.count_waste(WasteType.YELLOW),
+                "Red wastes": lambda m: m.count_waste(WasteType.RED),
+                "Total wastes": lambda m: m.count_waste(),
+                "Wastes disposed": lambda m: m.wastes_disposed,
+                "Known cells": lambda m: m.known_cells(),
+                "Exploration ratio": lambda m: m.exploration_ratio(),
+                "Waste reports": lambda m: m.message_counters["waste_reports"],
+                "Handoff reports": lambda m: m.message_counters["handoff_reports"],
+                "Map shares": lambda m: m.message_counters["map_shares"],
+                "Total messages": lambda m: m.total_messages(),
             }
         )
         self.datacollector.collect(self)
 
-    # ------------------------------------------------------------------
-    # Mesa step
-    # ------------------------------------------------------------------
+    def _zone_of(self, x):
+        if x < self.z1_end:
+            return ZoneType.Z1
+        if x < self.z2_end:
+            return ZoneType.Z2
+        return ZoneType.Z3
+
+    def _place_radioactivity(self):
+        for x in range(self.grid_width):
+            for y in range(self.grid_height):
+                zone = self._zone_of(x)
+                agent = RadioactivityAgent(self, zone)
+                self.grid.place_agent(agent, (x, y))
+                self.radiation_layer.set_cell((x, y), agent.radioactivity)
+
+    def _place_waste_disposal(self):
+        x = self.grid_width - 1
+        y = self.random.randint(0, self.grid_height - 1)
+
+        for agent in self.grid.get_cell_list_contents([(x, y)]):
+            if isinstance(agent, RadioactivityAgent):
+                agent.radioactivity = WASTE_DISPOSAL_RADIOACTIVITY
+                self.radiation_layer.set_cell((x, y), agent.radioactivity)
+                break
+
+        disposal = WasteDisposalAgent(self)
+        self.grid.place_agent(disposal, (x, y))
+        self.disposal_pos = (x, y)
+
+    def _place_wastes(self, n_wastes):
+        z1_cells = [
+            (x, y)
+            for x in range(self.z1_end)
+            for y in range(self.grid_height)
+        ]
+        for pos in self.random.sample(z1_cells, min(n_wastes, len(z1_cells))):
+            self.grid.place_agent(WasteAgent(self, WasteType.GREEN), pos)
+
+    def _place_robots(self, n_green, n_yellow, n_red):
+        from agents import GreenAgent, RedAgent, YellowAgent
+
+        for _ in range(n_green):
+            pos = (
+                self.random.randint(0, self.z1_end - 1),
+                self.random.randint(0, self.grid_height - 1),
+            )
+            self.grid.place_agent(GreenAgent(self), pos)
+
+        for _ in range(n_yellow):
+            pos = (
+                self.random.randint(0, self.z2_end - 1),
+                self.random.randint(0, self.grid_height - 1),
+            )
+            self.grid.place_agent(YellowAgent(self), pos)
+
+        for _ in range(n_red):
+            pos = (
+                self.random.randint(0, self.grid_width - 1),
+                self.random.randint(0, self.grid_height - 1),
+            )
+            self.grid.place_agent(RedAgent(self), pos)
+
+    def register_message(self, category, amount=1):
+        if category in self.message_counters:
+            self.message_counters[category] += amount
+
+    def total_messages(self):
+        return sum(self.message_counters.values())
+
+    def do(self, agent, action):
+        action_type = action.get("type")
+
+        if action_type == Action.MOVE:
+            self._do_move(agent, action)
+        elif action_type == Action.PICK_UP:
+            self._do_pick_up(agent, action)
+        elif action_type == Action.TRANSFORM:
+            self._do_transform(agent)
+        elif action_type == Action.PUT_DOWN:
+            self._do_put_down(agent)
+
+        return self._build_percepts(agent)
+
+    def _do_move(self, agent, action):
+        dx, dy = action.get("direction", (0, 0))
+        cx, cy = agent.pos
+        nx, ny = cx + dx, cy + dy
+
+        if not (0 <= nx < self.grid_width and 0 <= ny < self.grid_height):
+            return
+        if not self._can_enter(agent, nx):
+            return
+
+        self.grid.move_agent(agent, (nx, ny))
+
+    def _can_enter(self, agent, x):
+        from agents import GreenAgent, RedAgent, YellowAgent
+
+        zone = self._zone_of(x)
+        if isinstance(agent, GreenAgent):
+            return zone == ZoneType.Z1
+        if isinstance(agent, YellowAgent):
+            return zone in (ZoneType.Z1, ZoneType.Z2)
+        if isinstance(agent, RedAgent):
+            return True
+        return False
+
+    def _do_pick_up(self, agent, action):
+        from agents import GreenAgent, RedAgent, YellowAgent
+
+        waste_id = action.get("waste_id")
+        waste = next(
+            (
+                other
+                for other in self.grid.get_cell_list_contents([agent.pos])
+                if isinstance(other, WasteAgent) and other.unique_id == waste_id
+            ),
+            None,
+        )
+
+        if waste is None or waste.picked_up:
+            return
+
+        if isinstance(agent, GreenAgent):
+            if waste.waste_type != WasteType.GREEN or len(agent.inventory) >= 2:
+                return
+        elif isinstance(agent, YellowAgent):
+            if waste.waste_type != WasteType.YELLOW or len(agent.inventory) >= 2:
+                return
+        elif isinstance(agent, RedAgent):
+            if waste.waste_type != WasteType.RED or len(agent.inventory) >= 1:
+                return
+        else:
+            return
+
+        waste.picked_up = True
+        self.grid.remove_agent(waste)
+        agent.inventory.append(waste)
+
+    def _do_transform(self, agent):
+        from agents import GreenAgent, YellowAgent
+
+        if isinstance(agent, GreenAgent):
+            required_type = WasteType.GREEN
+            produced_type = WasteType.YELLOW
+        elif isinstance(agent, YellowAgent):
+            required_type = WasteType.YELLOW
+            produced_type = WasteType.RED
+        else:
+            return
+
+        matching = [waste for waste in agent.inventory if waste.waste_type == required_type]
+        if len(matching) < 2:
+            return
+
+        for waste in matching[:2]:
+            agent.inventory.remove(waste)
+            waste.remove()
+
+        new_waste = WasteAgent(self, produced_type)
+
+        if isinstance(agent, GreenAgent):
+            self.grid.place_agent(new_waste, agent.pos)
+        else:
+            new_waste.picked_up = True
+            agent.inventory.append(new_waste)
+
+    def _do_put_down(self, agent):
+        from agents import RedAgent
+
+        if not agent.inventory:
+            return
+
+        waste = agent.inventory.pop(0)
+
+        if (
+            isinstance(agent, RedAgent)
+            and agent.pos == self.disposal_pos
+            and waste.waste_type == WasteType.RED
+        ):
+            self.wastes_disposed += 1
+            waste.remove()
+            return
+
+        waste.picked_up = False
+        self.grid.place_agent(waste, agent.pos)
+
+    def _build_percepts(self, agent):
+        cx, cy = agent.pos
+        neighbors = [(cx, cy), (cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)]
+        percepts = {}
+
+        for nx, ny in neighbors:
+            if not (0 <= nx < self.grid_width and 0 <= ny < self.grid_height):
+                percepts[(nx, ny)] = {"in_bounds": False}
+                continue
+
+            contents = self.grid.get_cell_list_contents([(nx, ny)])
+            radio_agent = next(
+                (other for other in contents if isinstance(other, RadioactivityAgent)),
+                None,
+            )
+            wastes = [other for other in contents if isinstance(other, WasteAgent)]
+            robots = [other for other in contents if hasattr(other, "inventory")]
+            has_disposal = any(
+                isinstance(other, WasteDisposalAgent) for other in contents
+            )
+
+            percepts[(nx, ny)] = {
+                "in_bounds": True,
+                "radioactivity": radio_agent.radioactivity if radio_agent else None,
+                "zone": radio_agent.zone if radio_agent else None,
+                "wastes": [
+                    {"id": waste.unique_id, "type": waste.waste_type}
+                    for waste in wastes
+                ],
+                "has_disposal": has_disposal,
+                "robots": [
+                    {"id": robot.unique_id, "type": type(robot).__name__}
+                    for robot in robots
+                ],
+            }
+
+        return percepts
+
     def step(self):
-        # Activate only robot agents (random order)
-        robots = [a for a in self.agents if isinstance(a, (GreenRobotAgent, YellowRobotAgent, RedRobotAgent))]
+        robots = [agent for agent in self.agents if hasattr(agent, "step_agent")]
         self.random.shuffle(robots)
+
         for robot in robots:
-            robot.step()
+            robot.step_agent()
+
+        self.running = not self.is_finished()
         self.datacollector.collect(self)
 
-        # Stop when all waste is disposed
-        if count_waste(self, "green") == 0 and count_waste(self, "yellow") == 0 and count_waste(self, "red") == 0:
-            self.running = False
+    def count_waste(self, waste_type=None):
+        return sum(
+            1
+            for agent in self.agents
+            if isinstance(agent, WasteAgent)
+            and (waste_type is None or agent.waste_type == waste_type)
+        )
 
-    # ------------------------------------------------------------------
-    # do() – environment executes agent actions
-    # ------------------------------------------------------------------
-    def do(self, agent, action):
-        """
-        Execute an action for the given agent and return percepts.
+    def known_cells(self):
+        known = set()
+        for agent in self.agents:
+            if hasattr(agent, "knowledge"):
+                known.update(agent.knowledge["known_map"].keys())
+        return len(known)
 
-        Percepts format:
-            { (x, y): [list of agents at that cell], ... }
-        covering the agent's current cell and all 8 neighbours.
-        """
-        if isinstance(action, dict):
-            atype = action.get("type", WAIT)
-        else:
-            atype = action   # plain string e.g. WAIT
+    def exploration_ratio(self):
+        if self.total_cells == 0:
+            return 0.0
+        return self.known_cells() / self.total_cells
 
-        # ---- MOVE --------------------------------------------------------
-        if atype == MOVE:
-            target = action["pos"]
-            if self._can_move(agent, target):
-                self.grid.move_agent(agent, target)
-
-        # ---- PICK --------------------------------------------------------
-        elif atype == PICK:
-            waste_type = action["waste_type"]
-            cell_agents = self.grid.get_cell_list_contents([agent.pos])
-            wastes = [a for a in cell_agents
-                      if isinstance(a, WasteAgent) and a.waste_type == waste_type]
-            carried = [w for w in agent.knowledge["inventory"] if w.waste_type == waste_type]
-
-            # Capacity: green/yellow robots max 2, red robots max 1
-            capacity = 1 if agent.robot_type == "red" else 2
-            if wastes and len(carried) < capacity:
-                w = wastes[0]
-                agent.knowledge["inventory"].append(w)
-                self.grid.remove_agent(w)
-
-        # ---- TRANSFORM ---------------------------------------------------
-        elif atype == TRANS:
-            inv = agent.knowledge["inventory"]
-            if agent.robot_type == "green":
-                greens = [w for w in inv if w.waste_type == "green"]
-                if len(greens) >= 2:
-                    inv.remove(greens[0])
-                    inv.remove(greens[1])
-                    yellow = WasteAgent(self, "yellow")
-                    inv.append(yellow)
-
-            elif agent.robot_type == "yellow":
-                yellows = [w for w in inv if w.waste_type == "yellow"]
-                if len(yellows) >= 2:
-                    inv.remove(yellows[0])
-                    inv.remove(yellows[1])
-                    red = WasteAgent(self, "red")
-                    inv.append(red)
-
-        # ---- DROP --------------------------------------------------------
-        elif atype == DROP:
-            waste_type = action["waste_type"]
-            inv = agent.knowledge["inventory"]
-            to_drop = [w for w in inv if w.waste_type == waste_type]
-            if to_drop:
-                w = to_drop[0]
-                inv.remove(w)
-                # If dropping red waste at the disposal zone → "put away" (remove)
-                disposal_agents = self.grid.get_cell_list_contents([agent.pos])
-                if (any(isinstance(a, WasteDisposalZone) for a in disposal_agents)
-                        and waste_type == "red"):
-                    # Waste is put away; don't place it on the grid
-                    pass
-                else:
-                    self.grid.place_agent(w, agent.pos)
-
-        # ---- WAIT (or unknown) -------------------------------------------
-        # Nothing to do
-
-        return self._get_percepts(agent)
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-    def _can_move(self, agent, target) -> bool:
-        tx, ty = target
-        if not (0 <= tx < self.width and 0 <= ty < self.height):
-            return False
-        # Zone constraints
-        if agent.robot_type == "green" and tx >= self.z1_bound:
-            return False
-        if agent.robot_type == "yellow" and tx >= self.z2_bound:
-            return False
-        # Must be adjacent (Moore neighbourhood, distance 1)
-        cx, cy = agent.pos
-        if abs(tx - cx) > 1 or abs(ty - cy) > 1:
-            return False
-        return True
-
-    def _get_percepts(self, agent) -> dict:
-        """Return contents of the agent's cell and all 8 neighbours."""
-        percepts = {}
-        x, y = agent.pos
-        for dx in (-1, 0, 1):
-            for dy in (-1, 0, 1):
-                nx, ny = x + dx, y + dy
-                if 0 <= nx < self.width and 0 <= ny < self.height:
-                    percepts[(nx, ny)] = self.grid.get_cell_list_contents([(nx, ny)])
-        return percepts
+    def is_finished(self):
+        return not any(isinstance(agent, WasteAgent) for agent in self.agents)
