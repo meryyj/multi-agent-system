@@ -1,116 +1,85 @@
-# Group XX
-# Date: 2026-03-16
-# Members: Member 1, Member 2, Member 3
+# Group: XX | Date: 2026-03-16 | Members: <your names here>
+"""
+Visualization server using Mesa 3.x SolaraViz.
 
-from mesa.visualization.modules import CanvasGrid, ChartModule
-from mesa.visualization.ModularVisualization import ModularServer
+Run with:
+    solara run server.py
+"""
+
+import solara
+from mesa.visualization import SolaraViz, make_space_component, make_plot_component
 
 from model import RobotMission
-from agents import GreenAgent, YellowAgent, RedAgent
-from objects import Waste, DisposalZone, RadioactivityCell
+from objects import WasteAgent, WasteDisposalZone, RadioactivityAgent
+from agents import GreenRobotAgent, YellowRobotAgent, RedRobotAgent
 
 
+# ---------------------------------------------------------------------------
+# Portrayal function
+# ---------------------------------------------------------------------------
 def agent_portrayal(agent):
-    portrayal = {
-        "Shape": "circle",
-        "Filled": "true",
-        "Layer": 1,
-        "r": 0.45,
-    }
+    if isinstance(agent, GreenRobotAgent):
+        return {"color": "limegreen", "shape": "circle", "size": 20, "zorder": 3}
+    if isinstance(agent, YellowRobotAgent):
+        return {"color": "gold",      "shape": "circle", "size": 20, "zorder": 3}
+    if isinstance(agent, RedRobotAgent):
+        return {"color": "red",       "shape": "circle", "size": 20, "zorder": 3}
 
-    if isinstance(agent, RadioactivityCell):
-        portrayal["Shape"] = "rect"
-        portrayal["Filled"] = "true"
-        portrayal["Layer"] = 0
-        portrayal["w"] = 1
-        portrayal["h"] = 1
+    if isinstance(agent, WasteAgent):
+        color_map = {"green": "darkgreen", "yellow": "orange", "red": "darkred"}
+        return {"color": color_map[agent.waste_type], "shape": "rect", "size": 10, "zorder": 2}
 
-        if agent.zone == "z1":
-            portrayal["Color"] = "#dff6dd"
-        elif agent.zone == "z2":
-            portrayal["Color"] = "#fff1b8"
+    if isinstance(agent, WasteDisposalZone):
+        return {"color": "purple", "shape": "rect", "size": 18, "zorder": 1}
+
+    if isinstance(agent, RadioactivityAgent):
+        r = agent.radioactivity
+        if r < 0.33:
+            color = "#90EE90"
+        elif r < 0.66:
+            color = "#FFFF66"
         else:
-            portrayal["Color"] = "#ffd6d6"
-        return portrayal
+            color = "#FFA07A"
+        return {"color": color, "shape": "rect", "size": 30, "zorder": 0}
 
-    if isinstance(agent, DisposalZone):
-        portrayal["Shape"] = "rect"
-        portrayal["Filled"] = "true"
-        portrayal["Layer"] = 1
-        portrayal["w"] = 1
-        portrayal["h"] = 1
-        portrayal["Color"] = "#7db4ff"
-        return portrayal
-
-    if isinstance(agent, Waste):
-        portrayal["Shape"] = "rect"
-        portrayal["Filled"] = "true"
-        portrayal["Layer"] = 2
-        portrayal["w"] = 0.5
-        portrayal["h"] = 0.5
-
-        if agent.waste_type == "green":
-            portrayal["Color"] = "green"
-        elif agent.waste_type == "yellow":
-            portrayal["Color"] = "gold"
-        else:
-            portrayal["Color"] = "red"
-        return portrayal
-
-    if isinstance(agent, GreenAgent):
-        portrayal["Color"] = "#1b8f3a"
-        portrayal["Layer"] = 3
-        portrayal["text"] = "G"
-        portrayal["text_color"] = "white"
-        return portrayal
-
-    if isinstance(agent, YellowAgent):
-        portrayal["Color"] = "#d4a000"
-        portrayal["Layer"] = 3
-        portrayal["text"] = "Y"
-        portrayal["text_color"] = "black"
-        return portrayal
-
-    if isinstance(agent, RedAgent):
-        portrayal["Color"] = "#c21f1f"
-        portrayal["Layer"] = 3
-        portrayal["text"] = "R"
-        portrayal["text_color"] = "white"
-        return portrayal
-
-    return portrayal
+    return {}
 
 
-grid = CanvasGrid(agent_portrayal, 18, 10, 900, 500)
+# ---------------------------------------------------------------------------
+# Default model parameters
+# ---------------------------------------------------------------------------
+model_params = {
+    "width":           {"type": "SliderInt", "value": 15, "min": 9,  "max": 30, "step": 3, "label": "Grid width"},
+    "height":          {"type": "SliderInt", "value": 10, "min": 5,  "max": 20, "step": 1, "label": "Grid height"},
+    "n_green_robots":  {"type": "SliderInt", "value": 2,  "min": 1,  "max": 6,  "step": 1, "label": "# Green robots"},
+    "n_yellow_robots": {"type": "SliderInt", "value": 2,  "min": 1,  "max": 6,  "step": 1, "label": "# Yellow robots"},
+    "n_red_robots":    {"type": "SliderInt", "value": 2,  "min": 1,  "max": 6,  "step": 1, "label": "# Red robots"},
+    "n_green_waste":   {"type": "SliderInt", "value": 10, "min": 2,  "max": 30, "step": 1, "label": "# Green waste"},
+    "seed":            {"type": "SliderInt", "value": 42, "min": 0,  "max": 999,"step": 1, "label": "Random seed"},
+}
 
-chart = ChartModule(
-    [
-        {"Label": "Green waste on grid", "Color": "green"},
-        {"Label": "Yellow waste on grid", "Color": "gold"},
-        {"Label": "Red waste on grid", "Color": "red"},
-        {"Label": "Disposed red", "Color": "blue"},
-    ],
-    data_collector_name="datacollector",
+# ---------------------------------------------------------------------------
+# Instantiate model — SolaraViz in Mesa 3.x requires an instance, not a class
+# ---------------------------------------------------------------------------
+model = RobotMission(seed=42)
+
+# ---------------------------------------------------------------------------
+# Components
+# ---------------------------------------------------------------------------
+SpaceComponent = make_space_component(agent_portrayal)
+
+WastePlot = make_plot_component(
+    {"Green waste": "green", "Yellow waste": "gold", "Red waste": "red", "Total waste": "black"}
 )
 
-server = ModularServer(
-    RobotMission,
-    [grid, chart],
-    "Robot Mission MAS 2026",
-    {
-        "width": 18,
-        "height": 10,
-        "n_green_robots": 4,
-        "n_yellow_robots": 3,
-        "n_red_robots": 2,
-        "initial_green_waste": 30,
-        "enable_communication": True,
-        "seed": 42,
-    },
+# ---------------------------------------------------------------------------
+# SolaraViz page
+# ---------------------------------------------------------------------------
+page = SolaraViz(
+    model,
+    components=[SpaceComponent, WastePlot],
+    model_params=model_params,
+    name="Robot Waste Mission – MAS 2026",
 )
 
-server.port = 8521
-
-if __name__ == "__main__":
-    print("Launching Mesa server on http://127.0.0.1:8521")
-    server.launch()
+page  # required by solara

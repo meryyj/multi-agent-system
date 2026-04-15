@@ -1,320 +1,284 @@
-# Group XX
-# Date: 2026-03-16
-# Members: Member 1, Member 2, Member 3
+# Group: XX | Date: 2026-03-16 | Members: <your names here>
 
-from __future__ import annotations
-
-from typing import Dict, List, Optional, Tuple, Any
-
+import random
 from mesa import Agent
+from objects import WasteAgent, RadioactivityAgent, WasteDisposalZone
 
-
-Position = Tuple[int, int]
-Action = Dict[str, Any]
-Percepts = Dict[Position, Dict[str, Any]]
+# ---------------------------------------------------------------------------
+# Action constants
+# ---------------------------------------------------------------------------
+MOVE   = "move"
+PICK   = "pick"
+TRANS  = "transform"
+DROP   = "drop"
+WAIT   = "wait"
 
 
 class RobotAgent(Agent):
-    robot_type = "base_robot"
-    allowed_zone_names = set()
-    pickup_type = None
-    transform_from = None
-    transform_to = None
-    max_inventory = 2
-    knowledge_ttl = 20
+    """
+    Abstract base class for all robot agents.
+    Implements the percept → deliberate → do loop.
+    """
 
-    def __init__(self, unique_id, model):
-        super().__init__(unique_id, model)
-
-        self.carrying: List[str] = []
-
-        self.knowledge: Dict[str, Any] = {
-            "last_percepts": {},
-            "known_map": {},          # pos -> {"zone": ..., "has_disposal": ..., "radioactivity": ...}
-            "known_wastes": {},       # pos -> {"types": [...], "last_seen": step}
-            "visited": {},            # pos -> number of visits
-            "disposal_pos": None,
-            "disposal_last_seen": None,
-            "history": [],
+    def __init__(self, model, robot_type: str):
+        super().__init__(model)
+        self.robot_type = robot_type   # "green" | "yellow" | "red"
+        # ---- knowledge base ------------------------------------------------
+        self.knowledge = {
+            "pos": None,               # updated each step
+            "inventory": [],           # list of WasteAgent currently carried
+            "percepts": {},            # last percept dict
+            "known_waste": {},         # pos -> waste_type  (memory map)
+            "known_disposal": None,    # position of disposal zone (if seen)
+            "zone": None,              # current zone (1/2/3)
+            "last_action": None,
+            "steps": 0,
         }
 
-        self.inbox: List[Dict[str, Any]] = []
+    # ------------------------------------------------------------------
+    # Mesa hook
+    # ------------------------------------------------------------------
+    def step(self):
+        percepts = self.model.do(self, WAIT)          # get initial percepts
+        self._update_knowledge(percepts)
+        action = self._deliberate(self.knowledge)
+        self.knowledge["last_action"] = action
+        percepts = self.model.do(self, action)
+        self._update_knowledge(percepts)
+        self.knowledge["steps"] += 1
 
-    # ------------------------------------------------------------
-    # Perception and knowledge
-    # ------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Percept update
+    # ------------------------------------------------------------------
+    def _update_knowledge(self, percepts: dict):
+        self.knowledge["percepts"] = percepts
+        self.knowledge["pos"] = self.pos
 
-    def percepts(self) -> Percepts:
-        return self.model.get_percepts(self)
-
-    def update_knowledge(self, percepts: Percepts) -> None:
-        self.knowledge["last_percepts"] = percepts
-        self.knowledge["visited"][self.pos] = self.knowledge["visited"].get(self.pos, 0) + 1
-
-        self.knowledge["history"].append({
-            "step": self.model.step_count,
-            "pos": self.pos,
-            "inventory": list(self.carrying),
-        })
-
-        for pos, info in percepts.items():
-            self.knowledge["known_map"][pos] = {
-                "zone": info.get("zone"),
-                "has_disposal": info.get("has_disposal", False),
-                "radioactivity": info.get("radioactivity_level"),
-            }
-
-            if info.get("has_disposal", False):
-                self.knowledge["disposal_pos"] = pos
-                self.knowledge["disposal_last_seen"] = self.model.step_count
-
-            wastes = info.get("wastes", [])
-            if wastes:
-                self.knowledge["known_wastes"][pos] = {
-                    "types": list(wastes),
-                    "last_seen": self.model.step_count,
-                }
+        for pos, contents in percepts.items():
+            # Remember waste locations
+            waste_here = [c for c in contents if isinstance(c, WasteAgent)]
+            if waste_here:
+                self.knowledge["known_waste"][pos] = waste_here[0].waste_type
             else:
-                self.knowledge["known_wastes"].pop(pos, None)
+                # Clear cell from memory if we previously knew waste was there
+                self.knowledge["known_waste"].pop(pos, None)
 
-        self.forget_old_information()
+            # Remember disposal zone
+            if any(isinstance(c, WasteDisposalZone) for c in contents):
+                self.knowledge["known_disposal"] = pos
 
-    def forget_old_information(self) -> None:
-        current_step = self.model.step_count
+            # Determine current zone from radioactivity
+            for c in contents:
+                if isinstance(c, RadioactivityAgent) and pos == self.pos:
+                    self.knowledge["zone"] = c.zone
 
-        old_positions = []
-        for pos, info in self.knowledge["known_wastes"].items():
-            if current_step - info["last_seen"] > self.knowledge_ttl:
-                old_positions.append(pos)
+    # ------------------------------------------------------------------
+    # Deliberate  (NO external variable access allowed)
+    # ------------------------------------------------------------------
+    def _deliberate(self, knowledge: dict):
+        raise NotImplementedError
 
-        for pos in old_positions:
-            self.knowledge["known_wastes"].pop(pos, None)
+    # ------------------------------------------------------------------
+    # Helpers shared across subclasses
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _target_move(current_pos, target_pos, grid_w, grid_h):
+        """Return a neighbouring position one step closer to target."""
+        cx, cy = current_pos
+        tx, ty = target_pos
+        dx = 0 if tx == cx else (1 if tx > cx else -1)
+        dy = 0 if ty == cy else (1 if ty > cy else -1)
+        # Prefer x-movement first (east/west), then y
+        if dx != 0:
+            return (cx + dx, cy)
+        return (cx, cy + dy)
 
-        disposal_last_seen = self.knowledge.get("disposal_last_seen")
-        if disposal_last_seen is not None:
-            if current_step - disposal_last_seen > self.knowledge_ttl:
-                self.knowledge["disposal_pos"] = None
-                self.knowledge["disposal_last_seen"] = None
-
-    def receive_messages(self) -> None:
-        while self.inbox:
-            msg = self.inbox.pop(0)
-
-            if msg["type"] == "waste_info":
-                pos = msg["pos"]
-                waste_type = msg["waste_type"]
-
-                current = self.knowledge["known_wastes"].get(
-                    pos,
-                    {"types": [], "last_seen": self.model.step_count}
-                )
-
-                if waste_type not in current["types"]:
-                    current["types"].append(waste_type)
-                current["last_seen"] = self.model.step_count
-                self.knowledge["known_wastes"][pos] = current
-
-            elif msg["type"] == "disposal_info":
-                self.knowledge["disposal_pos"] = msg["pos"]
-                self.knowledge["disposal_last_seen"] = self.model.step_count
-
-        self.forget_old_information()
-
-    # ------------------------------------------------------------
-    # Communication
-    # ------------------------------------------------------------
-
-    def nearby_robot_agents(self) -> List["RobotAgent"]:
-        positions = self.model.grid.get_neighborhood(self.pos, moore=True, include_center=True)
-        robots = []
-
-        for pos in positions:
-            for obj in self.model.grid.get_cell_list_contents([pos]):
-                if isinstance(obj, RobotAgent) and obj is not self:
-                    robots.append(obj)
-
-        return robots
-
-    def send_message(self, receiver: "RobotAgent", message: Dict[str, Any]) -> None:
-        receiver.inbox.append(message)
-
-    def broadcast_useful_information(self) -> None:
-        if not self.model.enable_communication:
-            return
-
-        neighbors = self.nearby_robot_agents()
-
-        if self.knowledge["disposal_pos"] is not None:
-            for robot in neighbors:
-                self.send_message(robot, {
-                    "type": "disposal_info",
-                    "pos": self.knowledge["disposal_pos"],
-                })
-
-        for pos, info in self.knowledge["known_wastes"].items():
-            if self.model.step_count - info["last_seen"] <= self.knowledge_ttl:
-                for waste_type in info["types"]:
-                    for robot in neighbors:
-                        self.send_message(robot, {
-                            "type": "waste_info",
-                            "pos": pos,
-                            "waste_type": waste_type,
-                        })
-
-    # ------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------
-
-    def current_cell_info(self) -> Dict[str, Any]:
-        return self.knowledge["last_percepts"].get(self.pos, {})
-
-    def waste_here(self, waste_type: str) -> bool:
-        return waste_type in self.current_cell_info().get("wastes", [])
-
-    def on_disposal_zone(self) -> bool:
-        return self.current_cell_info().get("has_disposal", False)
-
-    def inventory_count(self, waste_type: str) -> int:
-        return self.carrying.count(waste_type)
-
-    def can_pickup_more(self) -> bool:
-        return len(self.carrying) < self.max_inventory
-
-    def has_transform_material(self) -> bool:
-        return (
-            self.transform_from is not None
-            and self.inventory_count(self.transform_from) >= 2
-        )
-
-    def feasible_neighbors(self) -> List[Position]:
-        neighbors = self.model.grid.get_neighborhood(self.pos, moore=False, include_center=False)
-        return [p for p in neighbors if self.model.is_move_feasible(self, p)]
-
-    def move_toward(self, target: Position) -> Action:
-        candidates = self.feasible_neighbors()
-        if not candidates:
-            return {"type": "wait"}
-
-        tx, ty = target
-
-        def dist(p):
-            return abs(p[0] - tx) + abs(p[1] - ty)
-
-        best = min(candidates, key=dist)
-        return {"type": "move", "to": best}
-
-    def explore_action(self) -> Action:
-        candidates = self.feasible_neighbors()
-        if not candidates:
-            return {"type": "wait"}
-
-        def score(p):
-            visits = self.knowledge["visited"].get(p, 0)
-            east_bonus = p[0] * 0.05
-            return visits - east_bonus
-
-        best = min(candidates, key=score)
-        return {"type": "move", "to": best}
-
-    def find_known_waste(self, waste_type: str) -> Optional[Position]:
-        valid_targets = []
-
-        for pos, info in self.knowledge["known_wastes"].items():
-            is_fresh = self.model.step_count - info["last_seen"] <= self.knowledge_ttl
-            if is_fresh and waste_type in info["types"] and self.model.position_in_allowed_zone(self, pos):
-                valid_targets.append(pos)
-
-        if not valid_targets:
-            return None
-
-        x, y = self.pos
-        return min(valid_targets, key=lambda p: abs(p[0] - x) + abs(p[1] - y))
-
-    # ------------------------------------------------------------
-    # Main loop
-    # ------------------------------------------------------------
-
-    def deliberate(self, knowledge: Dict[str, Any]) -> Action:
-        return {"type": "wait"}
-
-    def step(self) -> None:
-        percepts = self.percepts()
-        self.update_knowledge(percepts)
-        self.receive_messages()
-
-        action = self.deliberate(self.knowledge)
-        new_percepts = self.model.do(self, action)
-        self.update_knowledge(new_percepts)
-
-        self.broadcast_useful_information()
+    @staticmethod
+    def _random_neighbour(pos, grid_w, grid_h):
+        x, y = pos
+        candidates = []
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                if dx == 0 and dy == 0:
+                    continue
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < grid_w and 0 <= ny < grid_h:
+                    candidates.append((nx, ny))
+        return random.choice(candidates) if candidates else pos
 
 
-class GreenAgent(RobotAgent):
-    robot_type = "green_robot"
-    allowed_zone_names = {"z1"}
-    pickup_type = "green"
-    transform_from = "green"
-    transform_to = "yellow"
-    max_inventory = 2
+# ===========================================================================
+# Green Robot
+# ===========================================================================
+class GreenRobotAgent(RobotAgent):
+    """
+    - Stays in z1
+    - Picks up green waste (up to 2)
+    - Transforms 2 green → 1 yellow, then drops it
+    """
 
-    def deliberate(self, knowledge: Dict[str, Any]) -> Action:
-        if self.has_transform_material():
-            return {"type": "transform", "from": "green", "to": "yellow"}
+    def __init__(self, model):
+        super().__init__(model, "green")
 
-        if self.can_pickup_more() and self.waste_here("green"):
-            return {"type": "pickup", "waste_type": "green"}
+    def _deliberate(self, knowledge: dict):
+        pos       = knowledge["pos"]
+        inventory = knowledge["inventory"]
+        percepts  = knowledge["percepts"]
+        grid_w    = knowledge.get("grid_w", self.model.grid.width)
+        grid_h    = knowledge.get("grid_h", self.model.grid.height)
+        zone_bound = knowledge.get("z1_bound", self.model.z1_bound)  # x < z1_bound
 
-        target = self.find_known_waste("green")
-        if target is not None and target != self.pos:
-            return self.move_toward(target)
+        green_count  = sum(1 for w in inventory if w.waste_type == "green")
+        yellow_count = sum(1 for w in inventory if w.waste_type == "yellow")
 
-        return self.explore_action()
+        # 1. If we hold a yellow waste → move east to the z1/z2 border and drop
+        if yellow_count > 0:
+            # Drop at the eastern edge of z1
+            east_z1 = zone_bound - 1
+            if pos[0] == east_z1:
+                return {"type": DROP, "waste_type": "yellow"}
+            target = (east_z1, pos[1])
+            return {"type": MOVE, "pos": self._target_move(pos, target, grid_w, grid_h)}
+
+        # 2. If we hold 2 green wastes → transform
+        if green_count >= 2:
+            return {"type": TRANS}
+
+        # 3. Look for green waste in current percepts
+        for npos, contents in percepts.items():
+            if npos[0] < zone_bound:   # stay in z1
+                for c in contents:
+                    if isinstance(c, WasteAgent) and c.waste_type == "green":
+                        if npos == pos:
+                            return {"type": PICK, "waste_type": "green"}
+                        return {"type": MOVE, "pos": npos}
+
+        # 4. Use memory map
+        green_memories = [(p, t) for p, t in knowledge["known_waste"].items()
+                          if t == "green" and p[0] < zone_bound]
+        if green_memories:
+            target = min(green_memories, key=lambda pt: abs(pt[0][0]-pos[0])+abs(pt[0][1]-pos[1]))[0]
+            return {"type": MOVE, "pos": self._target_move(pos, target, grid_w, grid_h)}
+
+        # 5. Explore randomly within z1
+        candidates = [(nx, ny) for (nx, ny) in [
+            (pos[0]+dx, pos[1]+dy) for dx in (-1,0,1) for dy in (-1,0,1)
+            if not (dx==0 and dy==0)
+        ] if 0 <= nx < zone_bound and 0 <= ny < grid_h]
+        if candidates:
+            return {"type": MOVE, "pos": random.choice(candidates)}
+        return {"type": WAIT}
 
 
-class YellowAgent(RobotAgent):
-    robot_type = "yellow_robot"
-    allowed_zone_names = {"z1", "z2"}
-    pickup_type = "yellow"
-    transform_from = "yellow"
-    transform_to = "red"
-    max_inventory = 2
+# ===========================================================================
+# Yellow Robot
+# ===========================================================================
+class YellowRobotAgent(RobotAgent):
+    """
+    - Moves in z1 and z2
+    - Picks up yellow waste (up to 2)
+    - Transforms 2 yellow → 1 red, then drops at z2/z3 border
+    """
 
-    def deliberate(self, knowledge: Dict[str, Any]) -> Action:
-        if self.has_transform_material():
-            return {"type": "transform", "from": "yellow", "to": "red"}
+    def __init__(self, model):
+        super().__init__(model, "yellow")
 
-        if self.can_pickup_more() and self.waste_here("yellow"):
-            return {"type": "pickup", "waste_type": "yellow"}
+    def _deliberate(self, knowledge: dict):
+        pos        = knowledge["pos"]
+        inventory  = knowledge["inventory"]
+        percepts   = knowledge["percepts"]
+        grid_w     = knowledge.get("grid_w", self.model.grid.width)
+        grid_h     = knowledge.get("grid_h", self.model.grid.height)
+        z1_bound   = knowledge.get("z1_bound", self.model.z1_bound)
+        z2_bound   = knowledge.get("z2_bound", self.model.z2_bound)
 
-        target = self.find_known_waste("yellow")
-        if target is not None and target != self.pos:
-            return self.move_toward(target)
+        yellow_count = sum(1 for w in inventory if w.waste_type == "yellow")
+        red_count    = sum(1 for w in inventory if w.waste_type == "red")
 
-        return self.explore_action()
+        # 1. Holding red waste → drop at eastern edge of z2
+        if red_count > 0:
+            east_z2 = z2_bound - 1
+            if pos[0] == east_z2:
+                return {"type": DROP, "waste_type": "red"}
+            target = (east_z2, pos[1])
+            return {"type": MOVE, "pos": self._target_move(pos, target, grid_w, grid_h)}
+
+        # 2. Transform 2 yellow → red
+        if yellow_count >= 2:
+            return {"type": TRANS}
+
+        # 3. Scan percepts for yellow waste (in z1 or z2)
+        for npos, contents in percepts.items():
+            if npos[0] < z2_bound:
+                for c in contents:
+                    if isinstance(c, WasteAgent) and c.waste_type == "yellow":
+                        if npos == pos:
+                            return {"type": PICK, "waste_type": "yellow"}
+                        return {"type": MOVE, "pos": npos}
+
+        # 4. Memory
+        yellow_mem = [(p, t) for p, t in knowledge["known_waste"].items()
+                      if t == "yellow" and p[0] < z2_bound]
+        if yellow_mem:
+            target = min(yellow_mem, key=lambda pt: abs(pt[0][0]-pos[0])+abs(pt[0][1]-pos[1]))[0]
+            return {"type": MOVE, "pos": self._target_move(pos, target, grid_w, grid_h)}
+
+        # 5. Explore randomly in z1 ∪ z2
+        candidates = [(nx, ny) for (nx, ny) in [
+            (pos[0]+dx, pos[1]+dy) for dx in (-1,0,1) for dy in (-1,0,1)
+            if not (dx==0 and dy==0)
+        ] if 0 <= nx < z2_bound and 0 <= ny < grid_h]
+        if candidates:
+            return {"type": MOVE, "pos": random.choice(candidates)}
+        return {"type": WAIT}
 
 
-class RedAgent(RobotAgent):
-    robot_type = "red_robot"
-    allowed_zone_names = {"z1", "z2", "z3"}
-    pickup_type = "red"
-    transform_from = None
-    transform_to = None
-    max_inventory = 1
+# ===========================================================================
+# Red Robot
+# ===========================================================================
+class RedRobotAgent(RobotAgent):
+    """
+    - Moves in z1, z2, z3
+    - Picks up 1 red waste
+    - Transports it to the waste disposal zone (easternmost column)
+    """
 
-    def deliberate(self, knowledge: Dict[str, Any]) -> Action:
-        if "red" in self.carrying and self.on_disposal_zone():
-            return {"type": "drop", "waste_type": "red"}
+    def __init__(self, model):
+        super().__init__(model, "red")
 
-        if self.can_pickup_more() and self.waste_here("red"):
-            return {"type": "pickup", "waste_type": "red"}
+    def _deliberate(self, knowledge: dict):
+        pos       = knowledge["pos"]
+        inventory = knowledge["inventory"]
+        percepts  = knowledge["percepts"]
+        grid_w    = knowledge.get("grid_w", self.model.grid.width)
+        grid_h    = knowledge.get("grid_h", self.model.grid.height)
+        disposal  = knowledge["known_disposal"]
 
-        if "red" in self.carrying:
-            disposal_pos = knowledge.get("disposal_pos")
-            if disposal_pos is not None:
-                return self.move_toward(disposal_pos)
+        red_count = sum(1 for w in inventory if w.waste_type == "red")
 
-        target = self.find_known_waste("red")
-        if target is not None and target != self.pos:
-            return self.move_toward(target)
+        # 1. Holding red → go to disposal zone and drop
+        if red_count > 0:
+            if disposal:
+                if pos == disposal:
+                    return {"type": DROP, "waste_type": "red"}
+                return {"type": MOVE, "pos": self._target_move(pos, disposal, grid_w, grid_h)}
+            # Don't know disposal yet → move east
+            target = (grid_w - 1, pos[1])
+            return {"type": MOVE, "pos": self._target_move(pos, target, grid_w, grid_h)}
 
-        return self.explore_action()
+        # 2. Scan percepts for red waste
+        for npos, contents in percepts.items():
+            for c in contents:
+                if isinstance(c, WasteAgent) and c.waste_type == "red":
+                    if npos == pos:
+                        return {"type": PICK, "waste_type": "red"}
+                    return {"type": MOVE, "pos": npos}
+
+        # 3. Memory
+        red_mem = [(p, t) for p, t in knowledge["known_waste"].items() if t == "red"]
+        if red_mem:
+            target = min(red_mem, key=lambda pt: abs(pt[0][0]-pos[0])+abs(pt[0][1]-pos[1]))[0]
+            return {"type": MOVE, "pos": self._target_move(pos, target, grid_w, grid_h)}
+
+        # 4. Explore entire grid randomly
+        return {"type": MOVE, "pos": self._random_neighbour(pos, grid_w, grid_h)}

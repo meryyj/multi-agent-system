@@ -1,127 +1,92 @@
-# Group XX
-# Date: 2026-03-16
-# Members: Member 1, Member 2, Member 3
+# Group: XX | Date: 2026-03-16 | Members: <your names here>
+"""
+run.py – headless simulation runner.
 
-import os
-import pandas as pd
+Usage:
+    python run.py                     # default parameters
+    python run.py --steps 200 --seed 0
+"""
+
+import argparse
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from model import RobotMission
 
 
-def ensure_dirs():
-    os.makedirs("results/plots", exist_ok=True)
-    os.makedirs("results/screenshots", exist_ok=True)
-
-
-def run_experiment(communication=True, steps=250, seed=42):
+def run_simulation(
+    steps: int = 300,
+    width: int = 15,
+    height: int = 10,
+    n_green_robots: int = 2,
+    n_yellow_robots: int = 2,
+    n_red_robots: int = 2,
+    n_green_waste: int = 10,
+    seed: int = 42,
+    output_chart: str = "waste_over_time.png",
+):
+    print(f"[RobotMission] Starting simulation | seed={seed} | steps={steps}")
     model = RobotMission(
-        width=18,
-        height=10,
-        n_green_robots=4,
-        n_yellow_robots=3,
-        n_red_robots=2,
-        initial_green_waste=30,
-        enable_communication=communication,
+        width=width,
+        height=height,
+        n_green_robots=n_green_robots,
+        n_yellow_robots=n_yellow_robots,
+        n_red_robots=n_red_robots,
+        n_green_waste=n_green_waste,
         seed=seed,
     )
 
-    for _ in range(steps):
+    for i in range(steps):
         if not model.running:
+            print(f"  → Mission complete at step {i}!")
             break
         model.step()
+        if (i + 1) % 50 == 0:
+            df = model.datacollector.get_model_vars_dataframe()
+            last = df.iloc[-1]
+            print(f"  Step {i+1:4d} | green={int(last['Green waste'])} "
+                  f"yellow={int(last['Yellow waste'])} red={int(last['Red waste'])}")
 
+    # ---- Plot results ----
     df = model.datacollector.get_model_vars_dataframe()
-    return model, df
-
-
-def plot_main(df, filename):
-    plt.figure(figsize=(10, 6))
-    plt.plot(df["Green waste on grid"], label="Green waste")
-    plt.plot(df["Yellow waste on grid"], label="Yellow waste")
-    plt.plot(df["Red waste on grid"], label="Red waste")
-    plt.plot(df["Disposed red"], label="Disposed red")
-    plt.xlabel("Step")
-    plt.ylabel("Count")
-    plt.title("Waste evolution over time")
-    plt.legend()
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(df.index, df["Green waste"],  color="green",  label="Green waste")
+    ax.plot(df.index, df["Yellow waste"], color="goldenrod", label="Yellow waste")
+    ax.plot(df.index, df["Red waste"],    color="red",    label="Red waste")
+    ax.plot(df.index, df["Total waste"],  color="black",  label="Total waste", linewidth=2, linestyle="--")
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Number of waste objects in the grid")
+    ax.set_title("Robot Waste Mission – waste count over time")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(filename)
-    plt.close()
-
-
-def multi_seed_summary(seeds, communication=True, steps=250):
-    rows = []
-
-    for seed in seeds:
-        model, df = run_experiment(
-            communication=communication,
-            steps=steps,
-            seed=seed
-        )
-
-        rows.append({
-            "seed": seed,
-            "communication": communication,
-            "steps_executed": len(df),
-            "disposed_red": model.total_disposed_red,
-            "mission_complete": model.is_mission_complete(),
-            "remaining_units": model.total_remaining_units(),
-        })
-
-    return pd.DataFrame(rows)
-
-
-def compare_comm_multi_seed(seeds, steps=250):
-    df_no = multi_seed_summary(seeds, communication=False, steps=steps)
-    df_yes = multi_seed_summary(seeds, communication=True, steps=steps)
-
-    summary = pd.concat([df_no, df_yes], ignore_index=True)
-    summary.to_csv("results/plots/multi_seed_summary.csv", index=False)
-
-    avg_no = df_no["disposed_red"].mean()
-    avg_yes = df_yes["disposed_red"].mean()
-
-    plt.figure(figsize=(8, 5))
-    plt.bar(["No communication", "With communication"], [avg_no, avg_yes])
-    plt.ylabel("Average disposed red waste")
-    plt.title("Average performance across seeds")
-    plt.tight_layout()
-    plt.savefig("results/plots/compare_communication_multi_seed.png")
-    plt.close()
-
-    return df_no, df_yes, summary
-
-
-def main():
-    ensure_dirs()
-
-    model, df = run_experiment(communication=True, steps=500, seed=42)
-
-    print("Simulation finished")
-    print("Steps executed:", len(df))
-    print("Disposed red:", model.total_disposed_red)
-    print("Mission complete:", model.is_mission_complete())
-    print("Remaining units:", model.total_remaining_units())
-
-    df.to_csv("results/plots/run_data.csv", index=False)
-    plot_main(df, "results/plots/main_plot.png")
-
-    seeds = [1, 2, 3, 4, 5]
-    df_no, df_yes, summary = compare_comm_multi_seed(seeds, steps=500)
-
-    print("\nMulti-seed summary:")
-    print(summary)
-
-    print("\nAverage disposed red without communication:", df_no["disposed_red"].mean())
-    print("Average disposed red with communication:", df_yes["disposed_red"].mean())
-
-    print("\nSaved:")
-    print("- results/plots/run_data.csv")
-    print("- results/plots/main_plot.png")
-    print("- results/plots/multi_seed_summary.csv")
-    print("- results/plots/compare_communication_multi_seed.png")
+    plt.savefig(output_chart, dpi=120)
+    print(f"[RobotMission] Chart saved → {output_chart}")
+    return df
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--steps",          type=int, default=300)
+    parser.add_argument("--width",          type=int, default=15)
+    parser.add_argument("--height",         type=int, default=10)
+    parser.add_argument("--green-robots",   type=int, default=2)
+    parser.add_argument("--yellow-robots",  type=int, default=2)
+    parser.add_argument("--red-robots",     type=int, default=2)
+    parser.add_argument("--green-waste",    type=int, default=10)
+    parser.add_argument("--seed",           type=int, default=42)
+    parser.add_argument("--output",         type=str, default="waste_over_time.png")
+    args = parser.parse_args()
+
+    run_simulation(
+        steps=args.steps,
+        width=args.width,
+        height=args.height,
+        n_green_robots=args.green_robots,
+        n_yellow_robots=args.yellow_robots,
+        n_red_robots=args.red_robots,
+        n_green_waste=args.green_waste,
+        seed=args.seed,
+        output_chart=args.output,
+    )
