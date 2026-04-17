@@ -1,11 +1,21 @@
-seed,communication,steps_executed,disposed_red,mission_complete,remaining_units
-1,False,501,0,False,10
-2,False,501,0,False,10
-3,False,501,0,False,9
-4,False,501,1,False,8
-5,False,501,1,False,7
-1,True,501,7,False,1
-2,True,501,7,False,2
-3,True,501,0,False,8
-4,True,501,6,False,4
-5,True,501,0,False,10
+scenario,seed,steps_executed,mission_complete,disposed_red,remaining_wastes,carried_wastes,known_cells,exploration_ratio,waste_reports,handoff_reports,map_shares,disposal_reports,total_messages
+No communication,1,219,True,3,0,0,300,1.0,0,0,0,0,0
+No communication,2,212,True,3,0,0,300,1.0,0,0,0,0,0
+No communication,3,319,True,3,0,0,300,1.0,0,0,0,0,0
+No communication,4,248,True,3,0,0,300,1.0,0,0,0,0,0
+No communication,5,296,True,3,0,0,300,1.0,0,0,0,0,0
+No communication,6,279,True,3,0,0,300,1.0,0,0,0,0,0
+No communication,7,172,True,3,0,0,296,0.9866666666666667,0,0,0,0,0
+No communication,8,213,True,3,0,0,300,1.0,0,0,0,0,0
+No communication,9,263,True,3,0,0,300,1.0,0,0,0,0,0
+No communication,10,219,True,3,0,0,300,1.0,0,0,0,0,0
+With communication,1,144,True,3,0,0,300,1.0,272,27,648,6,953
+With communication,2,156,True,3,0,0,300,1.0,294,31,702,6,1033
+With communication,3,158,True,3,0,0,300,1.0,274,33,720,6,1033
+With communication,4,154,True,3,0,0,300,1.0,320,35,702,6,1063
+With communication,5,177,True,3,0,0,300,1.0,306,35,810,6,1157
+With communication,6,168,True,3,0,0,300,1.0,294,33,756,6,1089
+With communication,7,156,True,3,0,0,297,0.99,290,33,702,6,1031
+With communication,8,151,True,3,0,0,298,0.9933333333333333,298,31,684,6,1019
+With communication,9,206,True,3,0,0,300,1.0,354,39,936,6,1335
+With communication,10,142,True,3,0,0,300,1.0,300,35,648,6,989

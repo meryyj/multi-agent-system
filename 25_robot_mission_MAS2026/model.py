@@ -1,6 +1,6 @@
 # Groupe : 25
 # Date de creation : 2026-03-29
-# Membres : [Prenoms Noms]
+# Membres : Mathys - Groupe 25
 
 import mesa
 
@@ -23,7 +23,7 @@ class Action:
 
 
 class RobotMission(mesa.Model):
-    """Main MAS model for the hostile-environment robot mission."""
+    """Agent-based model for the hostile-environment robot mission."""
 
     SCENARIOS = ("No communication", "With communication")
 
@@ -40,10 +40,10 @@ class RobotMission(mesa.Model):
         seed=None,
     ):
         if grid_width % 3 != 0:
-            raise ValueError("grid_width must be a multiple of 3 to keep 3 balanced zones.")
+            raise ValueError("grid_width must be a multiple of 3 to keep balanced zones.")
         if n_green_wastes % 4 != 0:
             raise ValueError(
-                "n_green_wastes must be a multiple of 4 so the mission stays solvable."
+                "n_green_wastes must be a multiple of 4: 4 green wastes become 1 disposed red waste."
             )
         if scenario not in self.SCENARIOS:
             raise ValueError(f"scenario must be one of {self.SCENARIOS}.")
@@ -53,10 +53,24 @@ class RobotMission(mesa.Model):
         self.grid_width = grid_width
         self.grid_height = grid_height
         self.n_green_wastes = n_green_wastes
-        self.scenario = scenario
+        self.scenario_name = scenario
         self.communication_enabled = scenario == "With communication"
         self.total_cells = grid_width * grid_height
         self.running = True
+        self.step_count = 0
+
+        self.z1_end = grid_width // 3
+        self.z2_end = 2 * grid_width // 3
+
+        self.wastes_disposed = 0
+        self.expected_disposed = n_green_wastes // 4
+        self.mailbox = {}
+        self.message_counters = {
+            "waste_reports": 0,
+            "handoff_reports": 0,
+            "map_shares": 0,
+            "disposal_reports": 0,
+        }
 
         self.radiation_layer = mesa.space.PropertyLayer(
             "radiation_level",
@@ -72,18 +86,6 @@ class RobotMission(mesa.Model):
             property_layers=[self.radiation_layer],
         )
 
-        self.z1_end = grid_width // 3
-        self.z2_end = 2 * grid_width // 3
-
-        self.wastes_disposed = 0
-        self.mailbox = {}
-        self.message_counters = {
-            "waste_reports": 0,
-            "handoff_reports": 0,
-            "map_shares": 0,
-            "disposal_reports": 0,
-        }
-
         self._place_radioactivity()
         self._place_waste_disposal()
         self._place_wastes(n_green_wastes)
@@ -91,16 +93,23 @@ class RobotMission(mesa.Model):
 
         self.datacollector = mesa.DataCollector(
             model_reporters={
+                "Step": lambda m: m.step_count,
                 "Green wastes": lambda m: m.count_waste(WasteType.GREEN),
                 "Yellow wastes": lambda m: m.count_waste(WasteType.YELLOW),
                 "Red wastes": lambda m: m.count_waste(WasteType.RED),
                 "Total wastes": lambda m: m.count_waste(),
+                "Green on grid": lambda m: m.count_waste_on_grid(WasteType.GREEN),
+                "Yellow on grid": lambda m: m.count_waste_on_grid(WasteType.YELLOW),
+                "Red on grid": lambda m: m.count_waste_on_grid(WasteType.RED),
+                "Carried wastes": lambda m: m.count_carried_waste(),
                 "Wastes disposed": lambda m: m.wastes_disposed,
+                "Mission complete": lambda m: int(m.is_finished()),
                 "Known cells": lambda m: m.known_cells(),
                 "Exploration ratio": lambda m: m.exploration_ratio(),
                 "Waste reports": lambda m: m.message_counters["waste_reports"],
                 "Handoff reports": lambda m: m.message_counters["handoff_reports"],
                 "Map shares": lambda m: m.message_counters["map_shares"],
+                "Disposal reports": lambda m: m.message_counters["disposal_reports"],
                 "Total messages": lambda m: m.total_messages(),
             }
         )
@@ -124,16 +133,15 @@ class RobotMission(mesa.Model):
     def _place_waste_disposal(self):
         x = self.grid_width - 1
         y = self.random.randint(0, self.grid_height - 1)
+        self.disposal_pos = (x, y)
 
-        for agent in self.grid.get_cell_list_contents([(x, y)]):
+        for agent in self.grid.get_cell_list_contents([self.disposal_pos]):
             if isinstance(agent, RadioactivityAgent):
                 agent.radioactivity = WASTE_DISPOSAL_RADIOACTIVITY
-                self.radiation_layer.set_cell((x, y), agent.radioactivity)
+                self.radiation_layer.set_cell(self.disposal_pos, agent.radioactivity)
                 break
 
-        disposal = WasteDisposalAgent(self)
-        self.grid.place_agent(disposal, (x, y))
-        self.disposal_pos = (x, y)
+        self.grid.place_agent(WasteDisposalAgent(self), self.disposal_pos)
 
     def _place_wastes(self, n_wastes):
         z1_cells = [
@@ -163,7 +171,7 @@ class RobotMission(mesa.Model):
 
         for _ in range(n_red):
             pos = (
-                self.random.randint(0, self.grid_width - 1),
+                self.random.randint(self.z1_end, self.grid_width - 1),
                 self.random.randint(0, self.grid_height - 1),
             )
             self.grid.place_agent(RedAgent(self), pos)
@@ -185,7 +193,7 @@ class RobotMission(mesa.Model):
         elif action_type == Action.TRANSFORM:
             self._do_transform(agent)
         elif action_type == Action.PUT_DOWN:
-            self._do_put_down(agent)
+            self._do_put_down(agent, action)
 
         return self._build_percepts(agent)
 
@@ -194,6 +202,8 @@ class RobotMission(mesa.Model):
         cx, cy = agent.pos
         nx, ny = cx + dx, cy + dy
 
+        if abs(dx) + abs(dy) != 1:
+            return
         if not (0 <= nx < self.grid_width and 0 <= ny < self.grid_height):
             return
         if not self._can_enter(agent, nx):
@@ -225,20 +235,27 @@ class RobotMission(mesa.Model):
             ),
             None,
         )
-
         if waste is None or waste.picked_up:
             return
 
         if isinstance(agent, GreenAgent):
-            if waste.waste_type != WasteType.GREEN or len(agent.inventory) >= 2:
-                return
+            feasible = (
+                waste.waste_type == WasteType.GREEN
+                and all(item.waste_type == WasteType.GREEN for item in agent.inventory)
+                and len(agent.inventory) < 2
+            )
         elif isinstance(agent, YellowAgent):
-            if waste.waste_type != WasteType.YELLOW or len(agent.inventory) >= 2:
-                return
+            feasible = (
+                waste.waste_type == WasteType.YELLOW
+                and all(item.waste_type == WasteType.YELLOW for item in agent.inventory)
+                and len(agent.inventory) < 2
+            )
         elif isinstance(agent, RedAgent):
-            if waste.waste_type != WasteType.RED or len(agent.inventory) >= 1:
-                return
+            feasible = waste.waste_type == WasteType.RED and len(agent.inventory) == 0
         else:
+            feasible = False
+
+        if not feasible:
             return
 
         waste.picked_up = True
@@ -265,21 +282,26 @@ class RobotMission(mesa.Model):
             agent.inventory.remove(waste)
             waste.remove()
 
-        new_waste = WasteAgent(self, produced_type)
+        produced = WasteAgent(self, produced_type)
+        produced.picked_up = True
+        agent.inventory.append(produced)
 
-        if isinstance(agent, GreenAgent):
-            self.grid.place_agent(new_waste, agent.pos)
-        else:
-            new_waste.picked_up = True
-            agent.inventory.append(new_waste)
-
-    def _do_put_down(self, agent):
+    def _do_put_down(self, agent, action):
         from agents import RedAgent
 
-        if not agent.inventory:
+        requested_type = action.get("waste_type")
+        waste = next(
+            (
+                item
+                for item in agent.inventory
+                if requested_type is None or item.waste_type == requested_type
+            ),
+            None,
+        )
+        if waste is None:
             return
 
-        waste = agent.inventory.pop(0)
+        agent.inventory.remove(waste)
 
         if (
             isinstance(agent, RedAgent)
@@ -310,9 +332,7 @@ class RobotMission(mesa.Model):
             )
             wastes = [other for other in contents if isinstance(other, WasteAgent)]
             robots = [other for other in contents if hasattr(other, "inventory")]
-            has_disposal = any(
-                isinstance(other, WasteDisposalAgent) for other in contents
-            )
+            has_disposal = any(isinstance(other, WasteDisposalAgent) for other in contents)
 
             percepts[(nx, ny)] = {
                 "in_bounds": True,
@@ -332,12 +352,16 @@ class RobotMission(mesa.Model):
         return percepts
 
     def step(self):
+        if not self.running:
+            return
+
         robots = [agent for agent in self.agents if hasattr(agent, "step_agent")]
         self.random.shuffle(robots)
 
         for robot in robots:
             robot.step_agent()
 
+        self.step_count += 1
         self.running = not self.is_finished()
         self.datacollector.collect(self)
 
@@ -347,6 +371,22 @@ class RobotMission(mesa.Model):
             for agent in self.agents
             if isinstance(agent, WasteAgent)
             and (waste_type is None or agent.waste_type == waste_type)
+        )
+
+    def count_waste_on_grid(self, waste_type=None):
+        return sum(
+            1
+            for agent in self.agents
+            if isinstance(agent, WasteAgent)
+            and not agent.picked_up
+            and (waste_type is None or agent.waste_type == waste_type)
+        )
+
+    def count_carried_waste(self):
+        return sum(
+            len(agent.inventory)
+            for agent in self.agents
+            if hasattr(agent, "inventory")
         )
 
     def known_cells(self):

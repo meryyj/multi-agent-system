@@ -1,6 +1,6 @@
 # Groupe : 25
 # Date de creation : 2026-03-29
-# Membres : [Prenoms Noms]
+# Membres : Mathys - Groupe 25
 
 from mesa.visualization import SolaraViz, make_plot_component, make_space_component
 from mesa.visualization.components import AgentPortrayalStyle, PropertyLayerStyle
