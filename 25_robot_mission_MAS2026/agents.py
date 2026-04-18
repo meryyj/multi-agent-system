@@ -1,6 +1,9 @@
-# Groupe : 25
-# Date de creation : 2026-03-29
-# Membres : Mathys - Groupe 25
+# Group : 25
+# Created : 2026-03-29
+# Members : 
+# - Mathys Bagnah
+# - Xavier Plantier
+# - Meriem Jelassi
 
 from collections import defaultdict, deque
 
